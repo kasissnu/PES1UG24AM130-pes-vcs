@@ -10,11 +10,15 @@
 //   "100644 hello.txt\0" followed by 32 raw bytes of SHA-256
 
 #include "tree.h"
+#include "index.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <dirent.h>
 #include <sys/stat.h>
+
+int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out);
+
 
 // ─── Mode Constants ─────────────────────────────────────────────────────────
 
@@ -129,9 +133,72 @@ int tree_serialize(const Tree *tree, void **data_out, size_t *len_out) {
 //   - object_write    : save that binary buffer to the store as OBJ_TREE
 //
 // Returns 0 on success, -1 on error.
+static int tree_has_entry(const Tree *tree, const char *name) {
+    for (int i = 0; i < tree->count; i++) {
+        if (strcmp(tree->entries[i].name, name) == 0) return 1;
+    }
+    return 0;
+}
+static int write_tree_level(const Index *index, const char *prefix, ObjectID *id_out) {
+    Tree tree;
+    tree.count = 0;
+
+    size_t prefix_len = strlen(prefix);
+
+    for (int i = 0; i < index->count; i++) {
+        const char *path = index->entries[i].path;
+
+        if (prefix_len > 0 && strncmp(path, prefix, prefix_len) != 0) {
+            continue;
+        }
+
+        const char *rest = path + prefix_len;
+        if (*rest == '\0') continue;
+
+        const char *slash = strchr(rest, '/');
+
+        if (!slash) {
+            if (tree.count >= MAX_TREE_ENTRIES) return -1;
+
+            TreeEntry *entry = &tree.entries[tree.count++];
+            entry->mode = index->entries[i].mode;
+            entry->hash = index->entries[i].hash;
+            snprintf(entry->name, sizeof(entry->name), "%s", rest);
+        } else {
+            size_t name_len = (size_t)(slash - rest);
+            if (name_len == 0 || name_len >= 256) return -1;
+
+            char dirname[256];
+            memcpy(dirname, rest, name_len);
+            dirname[name_len] = '\0';
+
+            if (tree_has_entry(&tree, dirname)) continue;
+            if (tree.count >= MAX_TREE_ENTRIES) return -1;
+
+            char child_prefix[512];
+            snprintf(child_prefix, sizeof(child_prefix), "%s%s/", prefix, dirname);
+
+            ObjectID child_id;
+            if (write_tree_level(index, child_prefix, &child_id) != 0) return -1;
+
+            TreeEntry *entry = &tree.entries[tree.count++];
+            entry->mode = MODE_DIR;
+            entry->hash = child_id;
+            snprintf(entry->name, sizeof(entry->name), "%s", dirname);
+        }
+    }
+
+    void *data;
+    size_t len;
+    if (tree_serialize(&tree, &data, &len) != 0) return -1;
+
+    int rc = object_write(OBJ_TREE, data, len, id_out);
+    free(data);
+    return rc;
+}
 int tree_from_index(ObjectID *id_out) {
-    // TODO: Implement recursive tree building
-    // (See Lab Appendix for logical steps)
-    (void)id_out;
-    return -1;
+    Index index;
+    if (index_load(&index) != 0) return -1;
+
+    return write_tree_level(&index, "", id_out);
 }
