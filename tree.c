@@ -139,6 +139,7 @@ static int tree_has_entry(const Tree *tree, const char *name) {
     }
     return 0;
 }
+
 static int write_tree_level(const Index *index, const char *prefix, ObjectID *id_out) {
     Tree tree;
     tree.count = 0;
@@ -196,9 +197,11 @@ static int write_tree_level(const Index *index, const char *prefix, ObjectID *id
     free(data);
     return rc;
 }
+
 int tree_from_index(ObjectID *id_out) {
     Index index;
     if (index_load(&index) != 0) return -1;
 
     return write_tree_level(&index, "", id_out);
 }
+

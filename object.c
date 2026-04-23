@@ -93,19 +93,18 @@ int object_exists(const ObjectID *id) {
 
 //
 // Returns 0 on success, -1 on error.
-int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out) {
-    const char *type_str;
 
-    switch (type) {
-        case OBJ_BLOB:   type_str = "blob"; break;
-        case OBJ_TREE:   type_str = "tree"; break;
-        case OBJ_COMMIT: type_str = "commit"; break;
-        default: return -1;
-    }
+int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out) {
+    const char *type_str = NULL;
+
+    if (type == OBJ_BLOB) type_str = "blob";
+    else if (type == OBJ_TREE) type_str = "tree";
+    else if (type == OBJ_COMMIT) type_str = "commit";
+    else return -1;
 
     char header[64];
     int header_len = snprintf(header, sizeof(header), "%s %zu", type_str, len);
-    if (header_len < 0 || (size_t)header_len + 1 > sizeof(header)) return -1;
+    if (header_len < 0 || header_len >= (int)sizeof(header)) return -1;
 
     size_t total_len = (size_t)header_len + 1 + len;
     uint8_t *full = malloc(total_len);
@@ -113,26 +112,33 @@ int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out
 
     memcpy(full, header, (size_t)header_len);
     full[header_len] = '\0';
-    memcpy(full + header_len + 1, data, len);
+
+    if (len > 0 && data != NULL) {
+        memcpy(full + header_len + 1, data, len);
+    }
 
     compute_hash(full, total_len, id_out);
-
-    if (object_exists(id_out)) {
-        free(full);
-        return 0;
-    }
 
     char hex[HASH_HEX_SIZE + 1];
     hash_to_hex(id_out, hex);
 
-    char shard_dir[512];
-    snprintf(shard_dir, sizeof(shard_dir), "%s/%.2s", OBJECTS_DIR, hex);
-    mkdir(shard_dir, 0755);
+    char dir_path[512];
+    snprintf(dir_path, sizeof(dir_path), "%s/%.2s", OBJECTS_DIR, hex);
+
+    if (mkdir(dir_path, 0755) != 0 && access(dir_path, F_OK) != 0) {
+        free(full);
+        return -1;
+    }
 
     char final_path[512];
     object_path(id_out, final_path, sizeof(final_path));
 
-    char tmp_path[520];
+    if (access(final_path, F_OK) == 0) {
+        free(full);
+        return 0;
+    }
+
+    char tmp_path[600];
     snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", final_path);
 
     int fd = open(tmp_path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
@@ -141,42 +147,29 @@ int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out
         return -1;
     }
 
-    size_t written_total = 0;
-    while (written_total < total_len) {
-        ssize_t written = write(fd, full + written_total, total_len - written_total);
-        if (written <= 0) {
+    size_t done = 0;
+    while (done < total_len) {
+        ssize_t n = write(fd, full + done, total_len - done);
+        if (n <= 0) {
             close(fd);
             free(full);
             return -1;
         }
-        written_total += (size_t)written;
+        done += (size_t)n;
     }
 
-    if (fsync(fd) != 0) {
-        close(fd);
-        free(full);
-        return -1;
-    }
-
-    if (close(fd) != 0) {
-        free(full);
-        return -1;
-    }
+    fsync(fd);
+    close(fd);
 
     if (rename(tmp_path, final_path) != 0) {
         free(full);
         return -1;
     }
 
-    int dir_fd = open(shard_dir, O_RDONLY);
-    if (dir_fd >= 0) {
-        fsync(dir_fd);
-        close(dir_fd);
-    }
-
     free(full);
     return 0;
 }
+
 
 
 // Read an object from the store.
